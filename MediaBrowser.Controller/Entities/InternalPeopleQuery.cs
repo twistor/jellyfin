@@ -50,6 +50,12 @@ namespace MediaBrowser.Controller.Entities
 
         public string NameContains { get; set; }
 
+        /// <summary>
+        /// Gets or sets the names people must have, for example the names an external search provider found.
+        /// <c>null</c> means no restriction.
+        /// </summary>
+        public IReadOnlyList<string> Names { get; set; }
+
         public string NameStartsWith { get; set; }
 
         public string NameLessThan { get; set; }

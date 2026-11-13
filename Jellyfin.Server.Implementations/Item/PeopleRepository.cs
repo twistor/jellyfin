@@ -471,6 +471,12 @@ public class PeopleRepository(IDbContextFactory<JellyfinDbContext> dbProvider, I
             query = query.Where(e => e.BaseItems!.Any(w => w.ItemId == filter.ItemId && w.ListOrder <= filter.MaxListOrder.Value));
         }
 
+        if (filter.Names is not null)
+        {
+            var names = filter.Names;
+            query = query.Where(e => names.Contains(e.Name));
+        }
+
         if (!string.IsNullOrWhiteSpace(filter.NameContains))
         {
             var nameContainsUpper = filter.NameContains.ToUpper();

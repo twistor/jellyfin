@@ -1,10 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Data;
+using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Dto;
@@ -29,6 +33,7 @@ public class PersonsController : BaseJellyfinApiController
     private readonly ILibraryManager _libraryManager;
     private readonly IDtoService _dtoService;
     private readonly IUserManager _userManager;
+    private readonly ISearchManager _searchManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PersonsController"/> class.
@@ -36,14 +41,17 @@ public class PersonsController : BaseJellyfinApiController
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
+    /// <param name="searchManager">Instance of the <see cref="ISearchManager"/> interface.</param>
     public PersonsController(
         ILibraryManager libraryManager,
         IDtoService dtoService,
-        IUserManager userManager)
+        IUserManager userManager,
+        ISearchManager searchManager)
     {
         _libraryManager = libraryManager;
         _dtoService = dtoService;
         _userManager = userManager;
+        _searchManager = searchManager;
     }
 
     /// <summary>
@@ -72,7 +80,7 @@ public class PersonsController : BaseJellyfinApiController
     /// <returns>An <see cref="OkResult"/> containing the queryresult of persons.</returns>
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<QueryResult<BaseItemDto>> GetPersons(
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetPersons(
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         [FromQuery] string? searchTerm,
@@ -102,12 +110,20 @@ public class PersonsController : BaseJellyfinApiController
             : _userManager.GetUserById(userId.Value);
 
         var isFavoriteInFilters = filters.Any(f => f == ItemFilter.IsFavorite);
+
+        // With a search term, external search providers (e.g. Meilisearch) find the names first. The people query
+        // below then applies person types, favorites and access to those names, and keeps the providers' order.
+        var searchedNames = string.IsNullOrWhiteSpace(searchTerm)
+            ? null
+            : await SearchPeopleNamesAsync(searchTerm, userId, (startIndex ?? 0) + (limit ?? 50), HttpContext.RequestAborted).ConfigureAwait(false);
+
         var peopleItems = _libraryManager.GetPeopleItems(new InternalPeopleQuery(
             personTypes,
             excludePersonTypes)
         {
             AccessFilter = BuildAccessFilter(user),
-            NameContains = searchTerm,
+            NameContains = searchedNames is null ? searchTerm : null,
+            Names = searchedNames,
             NameStartsWith = nameStartsWith,
             NameLessThan = nameLessThan,
             NameStartsWithOrGreater = nameStartsWithOrGreater,
@@ -115,10 +131,27 @@ public class PersonsController : BaseJellyfinApiController
             IsFavorite = !isFavorite.HasValue && isFavoriteInFilters ? true : isFavorite,
             AppearsInItemId = appearsInItemId ?? Guid.Empty,
             ParentId = parentId,
-            StartIndex = startIndex,
-            Limit = limit ?? 0,
-            EnableTotalRecordCount = enableTotalRecordCount
+            StartIndex = searchedNames is null ? startIndex : null,
+            Limit = searchedNames is null ? limit ?? 0 : 0,
+            EnableTotalRecordCount = enableTotalRecordCount && searchedNames is null
         });
+
+        if (searchedNames is not null)
+        {
+            // Back into the providers' order, then page. The total is what the providers found and the filters kept.
+            var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < searchedNames.Count; i++)
+            {
+                rank.TryAdd(searchedNames[i], i);
+            }
+
+            var ordered = peopleItems.Items.OrderBy(person => rank.GetValueOrDefault(person.Name, int.MaxValue)).ToList();
+            var page = ordered.Skip(startIndex ?? 0).Take(limit ?? ordered.Count);
+            return new QueryResult<BaseItemDto>(
+                startIndex ?? 0,
+                enableTotalRecordCount ? ordered.Count : 0,
+                page.Select(person => _dtoService.GetItemByNameDto(person, dtoOptions, null, user)).ToArray());
+        }
 
         return new QueryResult<BaseItemDto>(
             peopleItems.StartIndex,
@@ -126,6 +159,44 @@ public class PersonsController : BaseJellyfinApiController
             peopleItems.Items
                 .Select(person => _dtoService.GetItemByNameDto(person, dtoOptions, null, user))
                 .ToArray());
+    }
+
+    // Names of the people the external search providers find, best first, or null when none of them can search or
+    // they find nothing. Only external providers: the internal one scans the database, which the people query does
+    // faster by itself.
+    private async Task<IReadOnlyList<string>?> SearchPeopleNamesAsync(string searchTerm, Guid? userId, int wanted, CancellationToken cancellationToken)
+    {
+        var query = new SearchProviderQuery
+        {
+            SearchTerm = searchTerm,
+            UserId = userId,
+            IncludeItemTypes = [BaseItemKind.Person],
+            Limit = Math.Max(wanted, 50) * 2
+        };
+
+        var names = new List<string>();
+        foreach (var provider in _searchManager.GetProviders().OfType<IExternalSearchProvider>())
+        {
+            if (!provider.CanSearch(query))
+            {
+                continue;
+            }
+
+            await foreach (var result in provider.SearchAsync(query, cancellationToken).ConfigureAwait(false))
+            {
+                if (_libraryManager.GetItemById(result.ItemId) is Person person)
+                {
+                    names.Add(person.Name);
+                }
+            }
+
+            if (names.Count > 0)
+            {
+                return names;
+            }
+        }
+
+        return null;
     }
 
     // People are not owned by a library, so nothing in the Peoples table says which of them a user is
