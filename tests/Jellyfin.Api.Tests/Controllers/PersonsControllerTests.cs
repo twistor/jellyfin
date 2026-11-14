@@ -6,9 +6,11 @@ using System.Security.Claims;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Controllers;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
@@ -25,6 +27,7 @@ public class PersonsControllerTests
     private readonly Mock<IDtoService> _dtoService = new();
     private readonly Mock<ISearchManager> _searchManager = new();
     private readonly List<InternalPeopleQuery> _queries = [];
+    private readonly ServerConfiguration _configuration = new();
     private BaseItem[] _peopleItems = [];
 
     public PersonsControllerTests()
@@ -104,6 +107,40 @@ public class PersonsControllerTests
         Assert.Equal(new[] { "Simon Seven", "Steven Ito" }, result.Items.Select(i => i.Name));
     }
 
+    [Fact]
+    public async Task GetPersons_FallbackOffAndExternalProviderFindsNothing_ReturnsEmpty()
+    {
+        _configuration.EnableDatabaseSearchFallback = false;
+        AddExternalProvider();
+
+        var result = await CallGetPersons(searchTerm: "zzqqxx");
+
+        Assert.Empty(_queries);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task GetPersons_FallbackOffAndExternalProviderFails_SearchesNames()
+    {
+        _configuration.EnableDatabaseSearchFallback = false;
+        var provider = new Mock<IExternalSearchProvider>();
+        provider.Setup(p => p.CanSearch(It.IsAny<SearchProviderQuery>())).Returns(true);
+        provider.Setup(p => p.SearchAsync(It.IsAny<SearchProviderQuery>(), It.IsAny<CancellationToken>()))
+            .Throws(new InvalidOperationException("search server down"));
+        _searchManager.Setup(m => m.GetProviders()).Returns([provider.Object]);
+
+        await CallGetPersons(searchTerm: "seven");
+
+        Assert.Equal("seven", Assert.Single(_queries).NameContains);
+    }
+
+    private IServerConfigurationManager ConfigurationManager()
+    {
+        var configurationManager = new Mock<IServerConfigurationManager>();
+        configurationManager.Setup(m => m.Configuration).Returns(_configuration);
+        return configurationManager.Object;
+    }
+
     private Guid AddPerson(string name)
     {
         var id = Guid.NewGuid();
@@ -131,7 +168,7 @@ public class PersonsControllerTests
 
     private async Task<QueryResult<BaseItemDto>> CallGetPersons(string? searchTerm, bool enableTotalRecordCount = true)
     {
-        var controller = new PersonsController(_libraryManager.Object, _dtoService.Object, Mock.Of<IUserManager>(), _searchManager.Object, NullLogger<PersonsController>.Instance)
+        var controller = new PersonsController(_libraryManager.Object, _dtoService.Object, Mock.Of<IUserManager>(), _searchManager.Object, ConfigurationManager(), NullLogger<PersonsController>.Instance)
         {
             ControllerContext = new ControllerContext
             {

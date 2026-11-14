@@ -11,6 +11,7 @@ using Jellyfin.Data;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -35,6 +36,7 @@ public class PersonsController : BaseJellyfinApiController
     private readonly IDtoService _dtoService;
     private readonly IUserManager _userManager;
     private readonly ISearchManager _searchManager;
+    private readonly IServerConfigurationManager _configurationManager;
     private readonly ILogger<PersonsController> _logger;
 
     /// <summary>
@@ -44,18 +46,21 @@ public class PersonsController : BaseJellyfinApiController
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
     /// <param name="searchManager">Instance of the <see cref="ISearchManager"/> interface.</param>
+    /// <param name="configurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{PersonsController}"/> interface.</param>
     public PersonsController(
         ILibraryManager libraryManager,
         IDtoService dtoService,
         IUserManager userManager,
         ISearchManager searchManager,
+        IServerConfigurationManager configurationManager,
         ILogger<PersonsController> logger)
     {
         _libraryManager = libraryManager;
         _dtoService = dtoService;
         _userManager = userManager;
         _searchManager = searchManager;
+        _configurationManager = configurationManager;
         _logger = logger;
     }
 
@@ -122,6 +127,11 @@ public class PersonsController : BaseJellyfinApiController
             ? null
             : await SearchPeopleNamesAsync(searchTerm, userId, (startIndex ?? 0) + (limit ?? 50), HttpContext.RequestAborted).ConfigureAwait(false);
 
+        if (searchedNames is { Count: 0 })
+        {
+            return new QueryResult<BaseItemDto>(startIndex ?? 0, 0, []);
+        }
+
         var peopleItems = _libraryManager.GetPeopleItems(new InternalPeopleQuery(
             personTypes,
             excludePersonTypes)
@@ -166,9 +176,9 @@ public class PersonsController : BaseJellyfinApiController
                 .ToArray());
     }
 
-    // Names of the people the external search providers find, best first, or null when none of them can search or
-    // they find nothing. Only external providers: the internal one scans the database, which the people query does
-    // faster by itself.
+    // Names of the people the external search providers find, best first. Null means search names in the database:
+    // none of them could answer, or they found nothing and the database fallback is on. Only external providers: the
+    // internal one scans the database, which the people query does faster by itself.
     private async Task<IReadOnlyList<string>?> SearchPeopleNamesAsync(string searchTerm, Guid? userId, int wanted, CancellationToken cancellationToken)
     {
         var query = new SearchProviderQuery
@@ -180,6 +190,7 @@ public class PersonsController : BaseJellyfinApiController
         };
 
         var names = new List<string>();
+        var answered = false;
         foreach (var provider in _searchManager.GetProviders().OfType<IExternalSearchProvider>())
         {
             if (!provider.CanSearch(query))
@@ -205,13 +216,14 @@ public class PersonsController : BaseJellyfinApiController
                 continue;
             }
 
+            answered = true;
             if (names.Count > 0)
             {
                 return names;
             }
         }
 
-        return null;
+        return answered && !_configurationManager.Configuration.EnableDatabaseSearchFallback ? [] : null;
     }
 
     // People are not owned by a library, so nothing in the Peoples table says which of them a user is
