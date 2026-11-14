@@ -13,6 +13,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
 
@@ -69,6 +70,22 @@ public class PersonsControllerTests
     }
 
     [Fact]
+    public async Task GetPersons_ExternalProviderFails_SearchesNames()
+    {
+        var provider = new Mock<IExternalSearchProvider>();
+        provider.Setup(p => p.CanSearch(It.IsAny<SearchProviderQuery>())).Returns(true);
+        provider.Setup(p => p.SearchAsync(It.IsAny<SearchProviderQuery>(), It.IsAny<CancellationToken>()))
+            .Throws(new InvalidOperationException("search server down"));
+        _searchManager.Setup(m => m.GetProviders()).Returns([provider.Object]);
+
+        await CallGetPersons(searchTerm: "seven");
+
+        var query = Assert.Single(_queries);
+        Assert.Equal("seven", query.NameContains);
+        Assert.Null(query.Names);
+    }
+
+    [Fact]
     public async Task GetPersons_ExternalProviderFindsPeople_KeepsItsOrder()
     {
         var simon = AddPerson("Simon Seven");
@@ -114,7 +131,7 @@ public class PersonsControllerTests
 
     private async Task<QueryResult<BaseItemDto>> CallGetPersons(string? searchTerm, bool enableTotalRecordCount = true)
     {
-        var controller = new PersonsController(_libraryManager.Object, _dtoService.Object, Mock.Of<IUserManager>(), _searchManager.Object)
+        var controller = new PersonsController(_libraryManager.Object, _dtoService.Object, Mock.Of<IUserManager>(), _searchManager.Object, NullLogger<PersonsController>.Instance)
         {
             ControllerContext = new ControllerContext
             {
