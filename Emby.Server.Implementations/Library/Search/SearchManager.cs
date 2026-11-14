@@ -7,6 +7,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -27,6 +28,7 @@ public class SearchManager : ISearchManager
     private readonly IUserManager _userManager;
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IItemQueryHelpers _queryHelpers;
+    private readonly IServerConfigurationManager _configurationManager;
     private readonly ILogger<SearchManager> _logger;
     private IExternalSearchProvider[] _externalProviders = [];
     private IInternalSearchProvider[] _internalProviders = [];
@@ -38,18 +40,21 @@ public class SearchManager : ISearchManager
     /// <param name="userManager">The user manager.</param>
     /// <param name="dbProvider">The database context factory.</param>
     /// <param name="queryHelpers">The shared item query helpers.</param>
+    /// <param name="configurationManager">The server configuration manager.</param>
     /// <param name="logger">The logger.</param>
     public SearchManager(
         ILibraryManager libraryManager,
         IUserManager userManager,
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IItemQueryHelpers queryHelpers,
+        IServerConfigurationManager configurationManager,
         ILogger<SearchManager> logger)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _dbProvider = dbProvider;
         _queryHelpers = queryHelpers;
+        _configurationManager = configurationManager;
         _logger = logger;
     }
 
@@ -86,7 +91,7 @@ public class SearchManager : ISearchManager
 
         // The internal providers only run when the external ones find nothing: their results would be
         // discarded otherwise, and their database search can take seconds on large libraries.
-        var externalResults = await CollectFromProvidersAsync(_externalProviders, query, searchTerm, cancellationToken).ConfigureAwait(false);
+        var (externalResults, externalAnswered) = await CollectFromProvidersAsync(_externalProviders, query, searchTerm, cancellationToken).ConfigureAwait(false);
 
         // Internal providers apply user-access filtering inline in their queries. External
         // providers don't know about user permissions, so they may return IDs from hidden
@@ -107,13 +112,17 @@ public class SearchManager : ISearchManager
             return externalResults;
         }
 
-        if (_internalProviders.Length == 0)
+        // An external provider that answered without results is final when the fallback is off. When
+        // none of them could answer (failed, or no provider handles the query), the database still searches.
+        if (_internalProviders.Length == 0
+            || (externalAnswered && !_configurationManager.Configuration.EnableDatabaseSearchFallback))
         {
             return [];
         }
 
         _logger.LogDebug("No results from external providers, using internal provider results");
-        return await CollectFromProvidersAsync(_internalProviders, query, searchTerm, cancellationToken).ConfigureAwait(false);
+        var (internalResults, _) = await CollectFromProvidersAsync(_internalProviders, query, searchTerm, cancellationToken).ConfigureAwait(false);
+        return internalResults;
     }
 
     private async Task<IReadOnlyList<SearchResult>> FilterByUserAccessAsync(
@@ -259,7 +268,8 @@ public class SearchManager : ISearchManager
         return new QueryResult<SearchHintInfo>(query.StartIndex, totalCount, orderedResults);
     }
 
-    private async Task<IReadOnlyList<SearchResult>> CollectFromProvidersAsync(
+    // Answered is true when at least one provider searched without failing, even if it found nothing.
+    private async Task<(IReadOnlyList<SearchResult> Results, bool Answered)> CollectFromProvidersAsync(
         IEnumerable<ISearchProvider> providers,
         SearchProviderQuery providerQuery,
         string searchTerm,
@@ -269,7 +279,7 @@ public class SearchManager : ISearchManager
         var applicable = providers.Where(p => p.CanSearch(providerQuery)).ToArray();
         if (applicable.Length == 0)
         {
-            return [];
+            return ([], false);
         }
 
         var perProvider = await Task.WhenAll(
@@ -279,20 +289,22 @@ public class SearchManager : ISearchManager
         var bestScores = new Dictionary<Guid, float>();
         foreach (var providerResults in perProvider)
         {
-            foreach (var result in providerResults)
+            foreach (var result in providerResults ?? [])
             {
                 UpdateBestScore(bestScores, result);
             }
         }
 
-        return bestScores
+        var results = bestScores
             .Select(kvp => new SearchResult(kvp.Key, kvp.Value))
             .OrderByDescending(r => r.Score)
             .Take(requestedLimit)
             .ToList();
+        return (results, perProvider.Any(r => r is not null));
     }
 
-    private async Task<IReadOnlyList<SearchResult>> CollectFromProviderAsync(
+    // Null when the provider failed.
+    private async Task<IReadOnlyList<SearchResult>?> CollectFromProviderAsync(
         ISearchProvider provider,
         SearchProviderQuery providerQuery,
         string searchTerm,
@@ -315,7 +327,7 @@ public class SearchManager : ISearchManager
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Search provider {Provider} failed for term '{SearchTerm}'", provider.Name, searchTerm);
-            return [];
+            return null;
         }
     }
 

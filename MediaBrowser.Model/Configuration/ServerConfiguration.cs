@@ -231,6 +231,12 @@ public class ServerConfiguration : BaseApplicationConfiguration
     public long SlowResponseThresholdMs { get; set; } = 500;
 
     /// <summary>
+    /// Gets or sets a value indicating whether the database search runs when the external search providers
+    /// answer without results. It always runs when none of them could answer.
+    /// </summary>
+    public bool EnableDatabaseSearchFallback { get; set; } = true;
+
+    /// <summary>
     /// Gets or sets the cors hosts.
     /// </summary>
     public string[] CorsHosts { get; set; } = new[] { "*" };
