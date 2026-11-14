@@ -5,8 +5,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Library.Search;
 using Jellyfin.Database.Implementations;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Model.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -67,13 +69,61 @@ public class SearchManagerTests
         Assert.Empty(results);
     }
 
-    private static SearchManager CreateManager(params ISearchProvider[] providers)
+    [Fact]
+    public async Task GetSearchResultsAsync_FallbackOffAndExternalFindsNothing_SkipsInternalProviders()
     {
+        var external = ExternalProvider();
+        var @internal = InternalProvider(new SearchResult(Guid.NewGuid(), 1f));
+        var manager = CreateManager(databaseFallback: false, external.Object, @internal.Object);
+
+        var results = await manager.GetSearchResultsAsync(_query, TestContext.Current.CancellationToken);
+
+        Assert.Empty(results);
+        @internal.Verify(p => p.SearchAsync(It.IsAny<SearchProviderQuery>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetSearchResultsAsync_FallbackOffAndExternalFails_UsesInternalProviders()
+    {
+        var internalId = Guid.NewGuid();
+        var external = ExternalProvider();
+        external.Setup(p => p.SearchAsync(It.IsAny<SearchProviderQuery>(), It.IsAny<CancellationToken>()))
+            .Throws(new InvalidOperationException("search server down"));
+        var @internal = InternalProvider(new SearchResult(internalId, 1f));
+        var manager = CreateManager(databaseFallback: false, external.Object, @internal.Object);
+
+        var results = await manager.GetSearchResultsAsync(_query, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { internalId }, results.Select(r => r.ItemId));
+    }
+
+    [Fact]
+    public async Task GetSearchResultsAsync_FallbackOffAndNoExternalProviders_UsesInternalProviders()
+    {
+        var internalId = Guid.NewGuid();
+        var @internal = InternalProvider(new SearchResult(internalId, 1f));
+        var manager = CreateManager(databaseFallback: false, @internal.Object);
+
+        var results = await manager.GetSearchResultsAsync(_query, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { internalId }, results.Select(r => r.ItemId));
+    }
+
+    private static SearchManager CreateManager(params ISearchProvider[] providers)
+        => CreateManager(databaseFallback: true, providers);
+
+    private static SearchManager CreateManager(bool databaseFallback, params ISearchProvider[] providers)
+    {
+        var configurationManager = new Mock<IServerConfigurationManager>();
+        configurationManager.Setup(m => m.Configuration)
+            .Returns(new ServerConfiguration { EnableDatabaseSearchFallback = databaseFallback });
+
         var manager = new SearchManager(
             Mock.Of<ILibraryManager>(),
             Mock.Of<IUserManager>(),
             Mock.Of<IDbContextFactory<JellyfinDbContext>>(),
             Mock.Of<IItemQueryHelpers>(),
+            configurationManager.Object,
             NullLogger<SearchManager>.Instance);
         manager.AddParts(providers);
         return manager;
