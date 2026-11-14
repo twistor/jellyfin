@@ -20,6 +20,7 @@ using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Api.Controllers;
 
@@ -34,6 +35,7 @@ public class PersonsController : BaseJellyfinApiController
     private readonly IDtoService _dtoService;
     private readonly IUserManager _userManager;
     private readonly ISearchManager _searchManager;
+    private readonly ILogger<PersonsController> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PersonsController"/> class.
@@ -42,16 +44,19 @@ public class PersonsController : BaseJellyfinApiController
     /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
     /// <param name="searchManager">Instance of the <see cref="ISearchManager"/> interface.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger{PersonsController}"/> interface.</param>
     public PersonsController(
         ILibraryManager libraryManager,
         IDtoService dtoService,
         IUserManager userManager,
-        ISearchManager searchManager)
+        ISearchManager searchManager,
+        ILogger<PersonsController> logger)
     {
         _libraryManager = libraryManager;
         _dtoService = dtoService;
         _userManager = userManager;
         _searchManager = searchManager;
+        _logger = logger;
     }
 
     /// <summary>
@@ -182,12 +187,22 @@ public class PersonsController : BaseJellyfinApiController
                 continue;
             }
 
-            await foreach (var result in provider.SearchAsync(query, cancellationToken).ConfigureAwait(false))
+            try
             {
-                if (_libraryManager.GetItemById(result.ItemId) is Person person)
+                await foreach (var result in provider.SearchAsync(query, cancellationToken).ConfigureAwait(false))
                 {
-                    names.Add(person.Name);
+                    if (_libraryManager.GetItemById(result.ItemId) is Person person)
+                    {
+                        names.Add(person.Name);
+                    }
                 }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A failing provider must not fail the request: the name search below still works.
+                _logger.LogWarning(ex, "Search provider {Provider} failed for people search '{SearchTerm}'", provider.Name, searchTerm);
+                names.Clear();
+                continue;
             }
 
             if (names.Count > 0)
