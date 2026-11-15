@@ -208,7 +208,7 @@ public class PersonsController : BaseJellyfinApiController
                     }
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 // A failing provider must not fail the request: the name search below still works.
                 _logger.LogWarning(ex, "Search provider {Provider} failed for people search '{SearchTerm}'", provider.Name, searchTerm);

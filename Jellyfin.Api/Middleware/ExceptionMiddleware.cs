@@ -54,6 +54,14 @@ public class ExceptionMiddleware
         {
             await _next(context).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            // The client closed the connection, so there is nobody to send an error to and nothing went wrong.
+            _logger.LogDebug(
+                "Request aborted by the client. URL {Method} {Url}.",
+                context.Request.Method,
+                context.Request.Path);
+        }
         catch (Exception ex)
         {
             if (context.Response.HasStarted)

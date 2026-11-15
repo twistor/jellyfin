@@ -324,6 +324,12 @@ public class SearchManager : ISearchManager
                 searchTerm);
             return results;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The caller cancelled, usually a client that left the page. Not a provider failure, and nobody needs
+            // the database search that would follow.
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Search provider {Provider} failed for term '{SearchTerm}'", provider.Name, searchTerm);
